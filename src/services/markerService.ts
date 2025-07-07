@@ -1,7 +1,18 @@
 // Servicio para comunicarse con la API del backend
 import type { CustomMarker } from '../components/Location';
 
-const API_BASE_URL = 'http://localhost:3001/api';
+// Detectar entorno y usar la URL correspondiente
+const getApiBaseUrl = () => {
+  // En desarrollo
+  if (import.meta.env.DEV) {
+    return 'http://localhost:3002/api';
+  }
+  
+  // En producción, usar variable de entorno o URL por defecto
+  return import.meta.env.VITE_API_URL || 'https://tu-backend.railway.app/api';
+};
+
+const API_BASE_URL = getApiBaseUrl();
 
 export interface DatabaseMarker extends CustomMarker {
   createdAt?: string;
