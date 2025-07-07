@@ -1,8 +1,10 @@
-// NUEVO Location.tsx con Leaflet centrado en Hospital de Paraná + lugares destacados
+// NUEVO Location.tsx con Leaflet + Base de datos SQLite
 import React, { useState, useEffect } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import MarkerService from '../services/markerService';
+import type { DatabaseMarker } from '../services/markerService';
 
 
 // Fix para íconos rotos en Leaflet + Vite
@@ -60,7 +62,7 @@ const hospitalIcon = L.divIcon({
   popupAnchor: [0, -20],
 });
 
-interface CustomMarker {
+export interface CustomMarker {
   id: string;
   position: [number, number];
   title: string;
@@ -70,26 +72,31 @@ interface CustomMarker {
 
 const hospitalLocation: [number, number] = [-31.7446, -60.5116]; // Hospital San Martín - Paraná
 
-// Clave para localStorage
+// Clave para localStorage (para migración)
 const MARKERS_STORAGE_KEY = 'hospital-custom-markers';
 
-// Función para cargar marcadores desde localStorage
-const loadMarkersFromStorage = (): CustomMarker[] => {
+// Función para migrar marcadores desde localStorage a la base de datos
+const migrateFromLocalStorage = async (): Promise<CustomMarker[]> => {
   try {
     const stored = localStorage.getItem(MARKERS_STORAGE_KEY);
-    return stored ? JSON.parse(stored) : [];
+    if (!stored) return [];
+    
+    const data = JSON.parse(stored);
+    const markers = Array.isArray(data) ? data : data.markers || [];
+    
+    if (markers.length > 0) {
+      const result = await MarkerService.migrateFromLocalStorage(markers);
+      if (result.data !== undefined) {
+        // Limpiar localStorage después de migrar exitosamente
+        localStorage.removeItem(MARKERS_STORAGE_KEY);
+        console.log(`✅ Migrados ${result.data} marcadores desde localStorage`);
+      }
+    }
+    
+    return markers;
   } catch (error) {
-    console.error('Error cargando marcadores:', error);
+    console.error('Error en migración:', error);
     return [];
-  }
-};
-
-// Función para guardar marcadores en localStorage
-const saveMarkersToStorage = (markers: CustomMarker[]) => {
-  try {
-    localStorage.setItem(MARKERS_STORAGE_KEY, JSON.stringify(markers));
-  } catch (error) {
-    console.error('Error guardando marcadores:', error);
   }
 };
 
@@ -118,7 +125,7 @@ const nearbyPlaces: CustomMarker[] = [
 ];
 
 const Location: React.FC = () => {
-  const [customMarkers, setCustomMarkers] = useState<CustomMarker[]>(() => loadMarkersFromStorage());
+  const [customMarkers, setCustomMarkers] = useState<DatabaseMarker[]>([]);
   const [newMarker, setNewMarker] = useState({
     title: '',
     description: '',
@@ -130,11 +137,48 @@ const Location: React.FC = () => {
   const [isSearching, setIsSearching] = useState(false);
   const [mapCenter, setMapCenter] = useState<[number, number]>(hospitalLocation);
   const [mapZoom, setMapZoom] = useState(17);
+  const [dbStats, setDbStats] = useState<any>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Guardar marcadores en localStorage cada vez que cambien
+  // Cargar marcadores desde la base de datos al iniciar
   useEffect(() => {
-    saveMarkersToStorage(customMarkers);
-  }, [customMarkers]);
+    loadMarkersFromDatabase();
+    loadDatabaseStats();
+  }, []);
+
+  // Función para cargar marcadores desde la base de datos
+  const loadMarkersFromDatabase = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const result = await MarkerService.getAllMarkers();
+      if (result.data) {
+        setCustomMarkers(result.data);
+        // Verificar si hay marcadores en localStorage para migrar
+        await migrateFromLocalStorage();
+      } else {
+        setError(result.error || 'Error cargando marcadores');
+      }
+    } catch (err) {
+      setError('Error de conexión con la base de datos');
+      console.error('Error cargando marcadores:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Función para cargar estadísticas de la base de datos
+  const loadDatabaseStats = async () => {
+    try {
+      const result = await MarkerService.getStats();
+      if (result.data) {
+        setDbStats(result.data);
+      }
+    } catch (err) {
+      console.error('Error cargando estadísticas:', err);
+    }
+  };
 
   // Función para buscar ubicaciones
   const searchLocation = async () => {
@@ -164,14 +208,37 @@ const Location: React.FC = () => {
   };
 
   // Función para eliminar un marcador personalizado
-  const removeCustomMarker = (markerId: string) => {
-    setCustomMarkers(prev => prev.filter(marker => marker.id !== markerId));
+  const removeCustomMarker = async (markerId: string) => {
+    try {
+      const result = await MarkerService.deleteMarker(markerId);
+      if (result.data !== undefined) {
+        setCustomMarkers(prev => prev.filter(marker => marker.id !== markerId));
+        await loadDatabaseStats();
+      } else {
+        alert(result.error || 'Error eliminando marcador');
+      }
+    } catch (err) {
+      alert('Error de conexión al eliminar marcador');
+    }
   };
 
   // Función para limpiar todos los marcadores personalizados
-  const clearAllMarkers = () => {
-    if (confirm('¿Estás seguro de que quieres eliminar TODOS los marcadores personalizados? Esta acción no se puede deshacer.')) {
-      setCustomMarkers([]);
+  const clearAllMarkers = async () => {
+    if (!confirm('¿Estás seguro de que quieres eliminar TODOS los marcadores personalizados? Esta acción no se puede deshacer.')) {
+      return;
+    }
+
+    try {
+      const result = await MarkerService.deleteAllMarkers();
+      if (result.data !== undefined) {
+        setCustomMarkers([]);
+        await loadDatabaseStats();
+        alert(`Se eliminaron ${result.data} marcadores exitosamente`);
+      } else {
+        alert(result.error || 'Error eliminando marcadores');
+      }
+    } catch (err) {
+      alert('Error de conexión al eliminar marcadores');
     }
   };
 
@@ -182,7 +249,18 @@ const Location: React.FC = () => {
       return;
     }
 
-    const dataStr = JSON.stringify(customMarkers, null, 2);
+    // Convertir formato de base de datos a formato de exportación
+    const exportData = customMarkers.map(marker => ({
+      id: marker.id,
+      title: marker.title,
+      description: marker.description,
+      icon: marker.icon,
+      position: marker.position,
+      createdAt: marker.createdAt,
+      updatedAt: marker.updatedAt
+    }));
+
+    const dataStr = JSON.stringify(exportData, null, 2);
     const dataBlob = new Blob([dataStr], { type: 'application/json' });
     const url = URL.createObjectURL(dataBlob);
     const link = document.createElement('a');
@@ -200,17 +278,38 @@ const Location: React.FC = () => {
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const importedMarkers = JSON.parse(e.target?.result as string);
         if (Array.isArray(importedMarkers)) {
-          // Generar nuevos IDs para evitar conflictos
-          const markersWithNewIds = importedMarkers.map(marker => ({
-            ...marker,
-            id: Date.now().toString() + Math.random().toString(36).substr(2, 9)
-          }));
-          setCustomMarkers(prev => [...prev, ...markersWithNewIds]);
-          alert(`Se importaron ${importedMarkers.length} marcadores exitosamente`);
+          let successCount = 0;
+          let errorCount = 0;
+
+          for (const marker of importedMarkers) {
+            const newMarker: CustomMarker = {
+              id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+              title: marker.title,
+              description: marker.description || '',
+              icon: marker.icon,
+              position: marker.position
+            };
+
+            const result = await MarkerService.createMarker(newMarker);
+            if (result.data) {
+              successCount++;
+            } else {
+              errorCount++;
+            }
+          }
+
+          await loadMarkersFromDatabase();
+          await loadDatabaseStats();
+          
+          if (errorCount === 0) {
+            alert(`Se importaron ${successCount} marcadores exitosamente`);
+          } else {
+            alert(`Se importaron ${successCount} marcadores. ${errorCount} fallaron.`);
+          }
         } else {
           alert('El archivo no tiene el formato correcto');
         }
@@ -225,19 +324,30 @@ const Location: React.FC = () => {
 
   const HandleMapClick = () => {
     useMapEvents({
-      click(e) {
+      click: async (e) => {
         if (newMarker.title && isAddingMarker) {
-          const newCustomMarker: CustomMarker = {
-            id: Date.now().toString(),
+          const markerToAdd: CustomMarker = {
+            id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
             position: [e.latlng.lat, e.latlng.lng],
             title: newMarker.title,
             description: newMarker.description,
             icon: newMarker.icon,
           };
-          setCustomMarkers((prev) => [...prev, newCustomMarker]);
-          setNewMarker({ title: '', description: '', icon: '📍' });
-          setIsAddingMarker(false);
-          alert(`Marcador "${newMarker.title}" agregado exitosamente!`);
+
+          try {
+            const result = await MarkerService.createMarker(markerToAdd);
+            if (result.data) {
+              setCustomMarkers(prev => [...prev, result.data!]);
+              setNewMarker({ title: '', description: '', icon: '📍' });
+              setIsAddingMarker(false);
+              await loadDatabaseStats();
+              alert(`Marcador "${newMarker.title}" agregado exitosamente a la base de datos!`);
+            } else {
+              alert(result.error || 'Error agregando marcador');
+            }
+          } catch (err) {
+            alert('Error de conexión al agregar marcador');
+          }
         }
       },
     });
@@ -486,6 +596,27 @@ const Location: React.FC = () => {
         {/* Gestión de datos */}
         <div className="bg-white rounded-xl shadow-lg p-6">
           <h3 className="text-xl font-semibold mb-4 text-gray-800">💾 Gestión de Marcadores</h3>
+          
+          {/* Estado de carga */}
+          {isLoading && (
+            <div className="mb-4 p-4 bg-blue-50 rounded-lg">
+              <p className="text-blue-800 text-sm">🔄 Cargando marcadores desde la base de datos...</p>
+            </div>
+          )}
+
+          {/* Errores */}
+          {error && (
+            <div className="mb-4 p-4 bg-red-50 rounded-lg">
+              <p className="text-red-800 text-sm">❌ {error}</p>
+              <button 
+                onClick={loadMarkersFromDatabase}
+                className="mt-2 bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm"
+              >
+                Reintentar
+              </button>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-3">
               <h4 className="font-medium text-gray-700">Importar Marcadores</h4>
@@ -500,21 +631,49 @@ const Location: React.FC = () => {
               />
             </div>
             <div className="space-y-3">
-              <h4 className="font-medium text-gray-700">Estado Actual</h4>
+              <h4 className="font-medium text-gray-700">Estado de la Base de Datos</h4>
               <div className="text-sm text-gray-600 space-y-1">
                 <p>📍 Marcadores guardados: <strong>{customMarkers.length}</strong></p>
-                <p>💾 Guardado automático: <strong>Activado</strong></p>
-                <p>🔄 Persistencia: <strong>localStorage del navegador</strong></p>
+                <p>💾 Almacenamiento: <strong>Base de datos SQLite</strong></p>
+                <p>🔄 Persistencia: <strong>Permanente</strong></p>
+                {dbStats && (
+                  <>
+                    <p>📊 Total en BD: <strong>{dbStats.totalMarkers}</strong></p>
+                    {dbStats.newestMarker && (
+                      <p className="text-xs text-gray-400">
+                        Último agregado: {new Date(dbStats.newestMarker).toLocaleString('es-AR')}
+                      </p>
+                    )}
+                  </>
+                )}
               </div>
+              <button
+                onClick={loadDatabaseStats}
+                className="bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded text-sm transition-colors"
+              >
+                🔄 Actualizar Stats
+              </button>
             </div>
           </div>
-          {customMarkers.length === 0 && (
-            <div className="mt-4 p-4 bg-blue-50 rounded-lg">
-              <p className="text-blue-800 text-sm">
-                ℹ️ No tienes marcadores personalizados guardados. Agrega algunos usando el formulario de arriba y se guardarán automáticamente en tu navegador.
+          
+          {customMarkers.length === 0 && !isLoading && (
+            <div className="mt-4 p-4 bg-green-50 rounded-lg">
+              <p className="text-green-800 text-sm">
+                ✨ No tienes marcadores personalizados guardados. Agrega algunos usando el formulario de arriba y se guardarán permanentemente en la base de datos.
               </p>
             </div>
           )}
+
+          {/* Información sobre ventajas de la base de datos */}
+          <div className="mt-4 p-4 bg-indigo-50 rounded-lg">
+            <h5 className="font-medium text-indigo-800 mb-2">🗄️ Ventajas de la Base de Datos:</h5>
+            <ul className="text-sm text-indigo-700 space-y-1">
+              <li>• Datos permanentes (no se pierden al cambiar navegador/dispositivo)</li>
+              <li>• Acceso desde cualquier dispositivo conectado</li>
+              <li>• Backup automático y recuperación de datos</li>
+              <li>• Rendimiento optimizado para grandes cantidades de marcadores</li>
+            </ul>
+          </div>
         </div>
       </div>
     </section>
