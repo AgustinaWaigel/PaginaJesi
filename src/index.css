@@ -19,3 +19,27 @@ body {
 .card {
   @apply bg-white rounded-xl shadow-lg p-6 transition-all duration-300 hover:shadow-xl;
 }
+
+/* Estilos para marcadores personalizados de Leaflet */
+.custom-marker {
+  border: none !important;
+  background: transparent !important;
+}
+
+.hospital-marker {
+  border: none !important;
+  background: transparent !important;
+}
+
+.leaflet-popup-content-wrapper {
+  border-radius: 8px !important;
+}
+
+.leaflet-popup-content {
+  margin: 8px 12px !important;
+  line-height: 1.4 !important;
+}
+
+.leaflet-popup-tip {
+  background: white !important;
+}
